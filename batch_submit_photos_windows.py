@@ -3,130 +3,71 @@ import json
 import mimetypes
 import uuid
 import concurrent.futures
-from typing import List, Tuple, Optional, Set, Dict, Any
-from google.cloud import storage # type: ignore
-import google.genai as genai # type: ignore
+from google.cloud import storage
+import google.genai as genai
 
-"""
-Module for scanning local directories, uploading missing images to Google Cloud Storage,
-and submitting them to Vertex AI Batch for processing.
-"""
+PROJECT_ID = "mutua-477100"
+LOCATION = "global"
+MODEL_NAME = "gemini-2.5-flash"
+BUCKET_NAME = "mutua-477100-batch-images"
+MAX_TEST_PHOTOS = 150000 # Next batch limit
 
-PROJECT_ID: str = "mutua-477100"
-LOCATION: str = "global"
-MODEL_NAME: str = "gemini-2.5-flash"
-BUCKET_NAME: str = "mutua-477100-batch-images"
-MAX_TEST_PHOTOS: int = 150000  # Next batch limit
-
-# Define the local project directory dynamically based on script location
-PROJECT_DIR: str = os.path.dirname(os.path.abspath(__file__))
-
-def get_mime_type(file_path: str) -> str:
-    """
-    Guesses the exact mime type of a file to pass to Google Cloud Storage.
-    
-    Args:
-        file_path (str): The absolute local path to the image file.
-        
-    Returns:
-        str: The guessed mime type as a string, e.g., 'image/jpeg' or 'image/heif'.
-    """
-    # Guess mime type using built-in library
+def get_mime_type(file_path):
     mime, _ = mimetypes.guess_type(file_path)
     if mime:
         return mime
-        
-    # Fallbacks for specific extensions
-    ext: str = os.path.splitext(file_path)[1].lower()
+    ext = os.path.splitext(file_path)[1].lower()
     if ext in [".heic", ".heif"]:
         return "image/heif"
-        
-    # Default fallback
     return "image/jpeg"
 
-def upload_to_gcs(local_path: str, bucket_name: str, gcs_path: str) -> Tuple[bool, Optional[str]]:
-    """
-    Uploads a single local file to a Google Cloud Storage bucket.
-    
-    Args:
-        local_path (str): The local fully qualified path to the file.
-        bucket_name (str): The name of the target GCS bucket.
-        gcs_path (str): The destination object name/path within the GCS bucket.
-        
-    Returns:
-        Tuple[bool, Optional[str]]: A tuple containing a boolean indicating success or failure,
-                                    and the GCS URI string (gs://...) if successful, or None.
-    """
+def upload_to_gcs(local_path, bucket_name, gcs_path):
+    """Uploads a file to Google Cloud Storage. Returns True on success, False on failure."""
     try:
-        # Initialize storage client and bucket instance
         client = storage.Client(project=PROJECT_ID)
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(gcs_path)
-        
-        # Perform the upload
         blob.upload_from_filename(local_path)
         return True, f"gs://{bucket_name}/{gcs_path}"
     except Exception as e:
         print(f"    ❌ Failed to upload {local_path}: {e}")
         return False, None
 
-def _upload_worker(args: Tuple[str, str, str]) -> Tuple[str, bool, Optional[str]]:
-    """
-    A worker function wrapper for concurrent uploads.
-    
-    Args:
-        args (Tuple[str, str, str]): A tuple containing args (local_path, bucket_name, gcs_path).
-        
-    Returns:
-        Tuple[str, bool, Optional[str]]: Local path processed, success boolean, and resulting GCS URI.
-    """
+def _upload_worker(args):
+    """Worker function for concurrent uploads."""
     local_path, bucket_name, gcs_path = args
     success, gcs_uri = upload_to_gcs(local_path, bucket_name, gcs_path)
     return local_path, success, gcs_uri
 
-def main() -> None:
-    """
-    Main entry point for scanning directories, deduplicating with caches, uploading
-    to GCS, and submitting the batch JSONL request to Vertex AI.
-    
-    Args:
-        None
-    
-    Returns:
-        None (The output is generation of side-effect tracking files and GCS uploads).
-    """
+def main():
     print(f"Initializing Gemini client (Project: {PROJECT_ID}, Location: {LOCATION}, Model: {MODEL_NAME})...")
-    # Initialize the Gemini GenAI high level library object
     client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
     
-    # Define Local Image Search Paths
-    PICTURE_DIRS: List[str] = [r"D:\Users\steven\Pictures", r"H:\\"]
-    
-    # State tracking file locations
-    OUTPUT_JSON: str = os.path.join(PROJECT_DIR, "photo_descriptions.json")
-    SUBMITTED_CACHE: str = os.path.join(PROJECT_DIR, "submitted_photos_cache.txt")
+    # Windows Paths
+    PICTURE_DIRS = [r"D:\Users\steven\Pictures"]
+    PROJECT_DIR = r"H:\Wan_project"
+    OUTPUT_JSON = os.path.join(PROJECT_DIR, "photo_descriptions.json")
+    SUBMITTED_CACHE = os.path.join(PROJECT_DIR, "submitted_photos_cache.txt")
     
     # 1. Deduplication Check using Relative Paths
-    processed_relative_paths: Set[str] = set()
+    processed_relative_paths = set()
     
     # Load recently submitted files to prevent double-submitting while jobs are in flight
     if os.path.exists(SUBMITTED_CACHE):
         with open(SUBMITTED_CACHE, "r", encoding="utf-8") as f:
             for line in f:
                 if line.strip():
-                    # Parse into a uniform format
                     processed_relative_paths.add(line.strip().replace("\\", "/").lower())
 
-    # Load previously successful jobs from descriptions file
     if os.path.exists(OUTPUT_JSON):
         with open(OUTPUT_JSON, "r", encoding="utf-8") as f:
-            content: str = f.read().strip()
+            content = f.read().strip()
             if content:
                 for item in json.loads(content):
-                    full_path: str = item.get("full_path", "")
+                    full_path = item.get("full_path", "")
                     
                     # Try to extract the relative path portion
-                    rel_path: str = full_path
+                    rel_path = full_path
                     if "Pictures/" in full_path:
                         rel_path = full_path.split("Pictures/", 1)[1]
                     elif "Pictures\\" in full_path:
@@ -142,29 +83,24 @@ def main() -> None:
 
     print(f"Loaded {len(processed_relative_paths)} existing processed relative paths.")
 
-    photos_to_process: List[str] = []
-    image_extensions: Set[str] = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
+    photos_to_process = []
+    image_extensions = {".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif"}
     
     print(f"Scanning directories for unprocessed photos...")
     for pic_dir in PICTURE_DIRS:
-        if not os.path.exists(pic_dir): 
-            continue
-            
+        if not os.path.exists(pic_dir): continue
         print(f" -> Scanning {pic_dir}")
         for root, _, files in os.walk(pic_dir):
-            if "venv" in root or ".git" in root or "$RECYCLE.BIN" in root or "System Volume Information" in root: 
-                continue
-                
+            if "venv" in root or ".git" in root or "$RECYCLE.BIN" in root or "System Volume Information" in root: continue
             for file in files:
                 if file.startswith("._") or file.startswith(".DS_Store"):
                     continue
-                    
-                ext: str = os.path.splitext(file)[1].lower()
+                ext = os.path.splitext(file)[1].lower()
                 if ext in image_extensions:
-                    full_path: str = os.path.join(root, file)
+                    full_path = os.path.join(root, file)
                     
                     # Get relative path for this file to compare against cache
-                    rel_path: str = ""
+                    rel_path = ""
                     if "Pictures\\" in full_path:
                         rel_path = full_path.split("Pictures\\", 1)[1]
                     elif "Pictures/" in full_path:
@@ -178,53 +114,49 @@ def main() -> None:
                     
                     rel_path = rel_path.replace("\\", "/").lower()
                     
-                    # Check if the photo is in the exclusion pool
                     if rel_path not in processed_relative_paths:
                         photos_to_process.append(full_path)
                         
                         if MAX_TEST_PHOTOS is not None and len(photos_to_process) >= MAX_TEST_PHOTOS:
                             break
-            # Multiple breaks to fast-exit walks limits                
             if MAX_TEST_PHOTOS is not None and len(photos_to_process) >= MAX_TEST_PHOTOS:
                 break
         if MAX_TEST_PHOTOS is not None and len(photos_to_process) >= MAX_TEST_PHOTOS:
             break
 
-    # Guard clause if nothing needs processing
     if not photos_to_process:
         print("No new photos found to process!")
         return
 
     print(f"Found {len(photos_to_process)} unprocessed photos. Starting batch preparation.")
 
-    # 2. Setup the text prompts
-    SYSTEM_PROMPT: str = "You are a detailed image describer. Provide a complete description of the photo. Include information about the subjects, setting, lighting, mood, actions, and any text visible. Return only the description."
-    PROMPT_TEXT: str = "Describe this photo completely."
+    SYSTEM_PROMPT = "You are a detailed image describer. Provide a complete description of the photo. Include information about the subjects, setting, lighting, mood, actions, and any text visible. Return only the description."
+    PROMPT_TEXT = "Describe this photo completely."
 
     # 2. Upload images to GCS Concurrently
-    jsonl_file_path: str = os.path.join(PROJECT_DIR, "batch_requests.jsonl")
-    job_uuid: str = str(uuid.uuid4())[:8]
+    jsonl_file_path = os.path.join(PROJECT_DIR, "batch_requests.jsonl")
+    job_uuid = str(uuid.uuid4())[:8]
     
-    # Calculate appropriate concurrent workers
-    workers: int = min(64, (os.cpu_count() or 1) * 4)
+    workers = min(64, (os.cpu_count() or 1) * 4)
     print(f"Uploading {len(photos_to_process)} images to GCS using up to {workers} threads...")
     
-    successful_uploads: List[Tuple[str, str]] = []
-    failed_uploads: List[str] = []
+    successful_uploads = []
+    failed_uploads = []
     
-    upload_tasks: List[Tuple[str, str, str]] = []
+    upload_tasks = []
     for local_img_path in photos_to_process:
-        file_name: str = os.path.basename(local_img_path)
-        gcs_img_path: str = f"batch_{job_uuid}/{file_name}"
+        file_name = os.path.basename(local_img_path)
+        gcs_img_path = f"batch_{job_uuid}/{file_name}"
         upload_tasks.append((local_img_path, BUCKET_NAME, gcs_img_path))
 
-    # Perform Concurrent Uploads
+    # ThreadPoolExecutor for parallel uploads
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
-        completed: int = 0
-        total: int = len(upload_tasks)
+        # TQDM-like manual tracking since we might not have it installed
+        completed = 0
+        total = len(upload_tasks)
         for local_path, success, gcs_uri in executor.map(_upload_worker, upload_tasks):
             completed += 1
-            if success and gcs_uri:
+            if success:
                 successful_uploads.append((local_path, gcs_uri))
                 if completed % 50 == 0 or completed == total:
                     print(f"  Progress: {completed}/{total} uploaded...")
@@ -232,13 +164,12 @@ def main() -> None:
                 failed_uploads.append(local_path)
                 print(f"  ❌ Failed: {local_path}")
 
-    # 3. Generate the JSONL requests formatting for Vertex
+    # 3. Generate the JSONL requests
     print("Generating JSONL manifest...")
     with open(jsonl_file_path, "w", encoding="utf-8") as f:
         for local_img_path, gcs_uri in successful_uploads:
-            # We enforce request_id is the local path so it natively maps back later
-            request_line: Dict[str, Any] = {
-                "request_id": local_img_path, 
+            request_line = {
+                "request_id": local_img_path, # Still use full local path here so retrieve script knows exact file location
                 "request": {
                     "contents": [{
                         "role": "user",
@@ -260,36 +191,33 @@ def main() -> None:
             }
             f.write(json.dumps(request_line) + "\n")
 
-    # Halt if everything failed to upload
     if not successful_uploads:
         print("❌ All image uploads failed. Aborting batch submission.")
         return
         
     print(f"✅ Successfully uploaded {len(successful_uploads)} images to GCS.")
     
-    # Save a log of failed paths for posterity
     if failed_uploads:
         print(f"⚠️ Warning: {len(failed_uploads)} images failed to upload to GCS!")
-        failed_log: str = os.path.join(PROJECT_DIR, f"failed_uploads_{job_uuid}.txt")
+        failed_log = os.path.join(PROJECT_DIR, f"failed_uploads_{job_uuid}.txt")
         with open(failed_log, "w", encoding="utf-8") as f:
             for fail_path in failed_uploads:
                 f.write(fail_path + "\n")
         print(f"   Saved list of failed uploads to: {failed_log}")
 
-    # Upload JSONL file to Cloud Storage as well
     print("Uploading JSONL manifest...")
-    gcs_jsonl_path: str = f"manifests/batch_requests_{job_uuid}.jsonl"
-    success, gcs_jsonl_uri = upload_to_gcs(jsonl_file_path, BUCKET_NAME, gcs_jsonl_path) # type: ignore
-    if not success or not gcs_jsonl_uri:
+    gcs_jsonl_path = f"manifests/batch_requests_{job_uuid}.jsonl"
+    success, gcs_jsonl_uri = upload_to_gcs(jsonl_file_path, BUCKET_NAME, gcs_jsonl_path)
+    if not success:
         print("❌ CRITICAL ERROR: Failed to upload JSONL manifest to GCS. Aborting batch job.")
         return
         
     print(f"Manifest uploaded to: {gcs_jsonl_uri}")
 
-    # 4. Trigger the Vertex AI Batch Job remotely
+    # 4. Trigger the Vertex AI Batch Job
     print(f"Triggering Vertex AI Batch Job (gemini-2.5-flash) in {LOCATION}...")
     try:
-        dest_uri: str = f"gs://{BUCKET_NAME}/batch_output_{job_uuid}/"
+        dest_uri = f"gs://{BUCKET_NAME}/batch_output_{job_uuid}/"
         batch_job = client.batches.create(
             model=MODEL_NAME,
             src=gcs_jsonl_uri,
@@ -300,20 +228,19 @@ def main() -> None:
         print(f"   GCS Output Destination: {dest_uri}")
         print(f"   Current Status: {batch_job.state}")
         
-        tracking_info: Dict[str, str] = {
-            "job_name": str(batch_job.name),
+        tracking_info = {
+            "job_name": batch_job.name,
             "output_uri": dest_uri,
             "status": "PENDING"
         }
         
-        # Save tracking data so retrieve script can pick it up
-        tracking_file: str = os.path.join(PROJECT_DIR, f"batch_job_{job_uuid}.json")
+        tracking_file = os.path.join(PROJECT_DIR, f"batch_job_{job_uuid}.json")
         with open(tracking_file, "w", encoding="utf-8") as f:
             json.dump(tracking_info, f, indent=4)
             
         print(f"\nSaved tracking info to {tracking_file}")
         
-        # 5. Log to the submitted cache to prevent resubmitting in future identical runs before finishing
+        # Log to the submitted cache to prevent resubmitting
         print(f"Logging {len(successful_uploads)} photos to submitted cache...")
         with open(SUBMITTED_CACHE, "a", encoding="utf-8") as f:
             for local_img_path, _ in successful_uploads:
