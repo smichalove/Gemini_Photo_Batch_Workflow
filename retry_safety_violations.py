@@ -64,6 +64,27 @@ def upload_gcs_worker(args: Tuple[str, str, str]) -> Tuple[bool, str, str]:
         print(f"Error uploading {local_path}: {e}")
         return False, local_path, str(e)
 
+def load_prompt_template(filename: str, default_text: str) -> str:
+    """
+    Reads a prompt template file from the workspace.
+    
+    Args:
+        filename (str): The base name of the text file.
+        default_text (str): Fallback string if the file is missing.
+        
+    Returns:
+        str: The loaded prompt string stripped of whitespace.
+    """
+    script_dir: str = os.path.dirname(os.path.abspath(__file__))
+    path: str = os.path.join(script_dir, "prompts", filename)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to read prompt file {filename}: {e}")
+    return default_text
+
 def main() -> None:
     """
     Main function to identify safety violations in the photo database, re-upload them to
@@ -171,6 +192,11 @@ def main() -> None:
     jsonl_file_path: str = os.path.join(PROJECT_DIR, f"retry_requests_{job_uuid}.jsonl")
     print(f"Generating batch manifest: {jsonl_file_path}")
     
+    retry_prompt: str = load_prompt_template(
+        "retry_prompt.txt",
+        "Provide a neutral, factual description of the visual elements in this image. Focus on objects, colors, and layout."
+    )
+    
     with open(jsonl_file_path, "w", encoding='utf-8') as f:
         for local_path, gcs_path in successful_uploads:
             # Reformat the request with a safer, purely factual prompt
@@ -182,7 +208,7 @@ def main() -> None:
                             "role": "user",
                             "parts": [
                                 {"fileData": {"fileUri": f"gs://{BUCKET_NAME}/{gcs_path}", "mimeType": get_mime_type(local_path)}},
-                                {"text": "Provide a neutral, factual description of the visual elements in this image. Focus on objects, colors, and layout."}
+                                {"text": retry_prompt}
                             ]
                         }
                     ],

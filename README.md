@@ -9,6 +9,16 @@ Automated workflow scripts for checking local photos, uploading to Google Cloud 
 3. Set up authentication: Create an `auth/` directory and place your `service_account.json` key inside. See `auth/README.md` for details. 
 4. External tool: Create a folder `exiftool/` and place `exiftool.exe` inside it.
 5. Setup your python environment and packages with `pip install -r requirements.txt`. (Optionally run `venv-photos\Scripts\activate`).
+6. Prompt templates: Configure your prompts by editing `prompts/system_prompt.txt`, `prompts/user_prompt.txt`, and `prompts/retry_prompt.txt` to align with your cataloging goals.
+
+## Prompt Customization
+
+To separate system behavior from core code, all model prompts are loaded dynamically from files in the `prompts/` directory:
+* **`prompts/system_prompt.txt`**: System instructions steering the Gemini describer.
+* **`prompts/user_prompt.txt`**: User query passed alongside each image to be described.
+* **`prompts/retry_prompt.txt`**: A factual, layout-focused prompt used to bypass false-positive safety violations.
+
+To steer the model for specific workloads (e.g. portraits, documents, landscapes, products), modify these files. The submit and retry scripts load them dynamically at execution time.
 
 ## Key Workflows
 

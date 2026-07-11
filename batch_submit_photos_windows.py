@@ -39,6 +39,26 @@ def _upload_worker(args):
     success, gcs_uri = upload_to_gcs(local_path, bucket_name, gcs_path)
     return local_path, success, gcs_uri
 
+def load_prompt_template(filename: str, default_text: str) -> str:
+    """Reads a prompt template file from the workspace.
+
+    Args:
+        filename: The base name of the text file (e.g., 'system_prompt.txt').
+        default_text: Fallback string if the file is missing.
+
+    Returns:
+        The loaded prompt string stripped of whitespace.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    path = os.path.join(script_dir, "prompts", filename)
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return f.read().strip()
+        except Exception as e:
+            print(f"⚠️ Warning: Failed to read prompt file {filename}: {e}")
+    return default_text
+
 def main():
     print(f"Initializing Gemini client (Project: {PROJECT_ID}, Location: {LOCATION}, Model: {MODEL_NAME})...")
     client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
@@ -130,8 +150,14 @@ def main():
 
     print(f"Found {len(photos_to_process)} unprocessed photos. Starting batch preparation.")
 
-    SYSTEM_PROMPT = "You are a detailed image describer. Provide a complete description of the photo. Include information about the subjects, setting, lighting, mood, actions, and any text visible. Return only the description."
-    PROMPT_TEXT = "Describe this photo completely."
+    SYSTEM_PROMPT = load_prompt_template(
+        "system_prompt.txt",
+        "You are a detailed image describer. Provide a complete description of the photo. Include information about the subjects, setting, lighting, mood, actions, and any text visible. Return only the description."
+    )
+    PROMPT_TEXT = load_prompt_template(
+        "user_prompt.txt",
+        "Describe this photo completely."
+    )
 
     # 2. Upload images to GCS Concurrently
     jsonl_file_path = os.path.join(PROJECT_DIR, "batch_requests.jsonl")
